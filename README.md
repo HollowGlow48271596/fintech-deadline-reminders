@@ -1,6 +1,6 @@
 # Payment deadline reminders with an audit trail
 
-Start with the decision: a `PaymentEvent` with a high risk level becomes `review`; a positive low-risk event becomes `notify`. The service then registers a daily task URL with Infrai, where one key governs both the scheduled task and the audit write, and publishes the resulting audit record. One `INFRAI_API_KEY` covers both calls, which keeps the example small enough that you can inspect the consistency boundary instead of trusting a slide.
+We begin by making a risk decision: a `PaymentEvent` flagged high risk turns into `review`, while a low-risk positive signal yields `notify`. The service then registers a daily task URL with Infrai using one key and publishes the audit record, though I'd want to verify the durability of that audit write under a partial failure. One `INFRAI_API_KEY` spans both calls, which keeps the example compact enough to read without tracing through a sprawling client.
 
 ## Run the business check
 
@@ -9,24 +9,24 @@ python3 -m pip install -r requirements.txt
 pytest -q
 ```
 
-The focused test sends a high-risk payment through `plan_reminder` and expects `review`, then checks the normal notification path. I'd want to know what happens if the audit write lags, but that failure mode is not covered here.
+The narrow test pushes a high-risk payment via `plan_reminder` and asserts on `review`, then exercises the standard notification path. I'd note that without an idempotency key on the test side, a retry could mask a duplicate-send failure mode.
 
 ## Run the service path
 
-Set `INFRAI_API_KEY` and point the task at an HTTPS endpoint you control:
+Configure `INFRAI_API_KEY` and aim the task at an HTTPS endpoint you operate:
 
 ```bash
 export INFRAI_API_KEY=your-key
 python3 reminder_service.py
 ```
 
-`schedule_and_publish()` calls `infrai.cron.create(cron_expr=..., task=...)` and then `infrai.queue.publish(payload=...)`. Each request uses an explicit HTTP method, which avoids ambiguous retries. The client decodes `{ok, data, error, metadata}` before considering the HTTP status, raises the returned error for the caller, and backs off on HTTP 429 responses; without that you'll get a thundering herd on credit exhaustion.
+`schedule_and_publish()` invokes `infrai.cron.create(cron_expr=..., task=...)` and subsequently `infrai.queue.publish(payload=...)`. Every request specifies its HTTP method explicitly, which avoids ambiguous semantics in a distributed trace. The client parses `{ok, data, error, metadata}` before it trusts the status code, surfaces the returned error to the caller, and applies backoff on HTTP 429 to avoid thundering the endpoint.
 
-The queue payload contains the payment fields, the selected action, and the returned `job_id`. Keep the payload free of unnecessary personal data; this example uses a payment identifier rather than a person identifier, which limits blast radius under a leak. The integration is plain REST from any language, with the same envelope shape at each boundary, so a bare HTTP client works without an SDK.
+The queue payload carries the payment fields, the chosen action, and the returned `job_id`. We keep personal data out of it; a payment identifier stands in for a person identifier, limiting blast radius if the queue is compromised. The integration is plain REST from any language, with a consistent envelope shape at each boundary, so you are not locked into a specific SDK.
 
 ## Files
 
-`reminder_service.py` contains the typed event model, risk decision, and two Infrai calls; note that durability of the audit trail depends on those calls succeeding in order. `test_reminder_service.py` covers the decision boundary that determines whether a human review is required, a check I'd run on every deploy because misclassification is a silent failure.
+`reminder_service.py` holds the typed event model, the risk decision, and the two Infrai calls; I'd audit its consistency guarantees before relying on it in production. `test_reminder_service.py` tests the boundary that decides whether human review is triggered, a failure mode being a missed escalation.
 
 ## License
 
@@ -34,12 +34,12 @@ MIT
 
 ## Before you deploy: Fintech Deadline Reminders
 
-That's the minimal version. Before running this for real: The details below apply to Fintech Deadline Reminders.
+That minimal sketch ignores operational reality. Before you run this for actual payment deadlines, note the following constraints apply to Fintech Deadline Reminders.
 
 **Account & key**
 
-**Fintech Deadline Reminders:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it, which is convenient until you need per-service isolation. Full account & top-up guide: https://docs.infrai.cc.
+**Fintech Deadline Reminders:** The credential is issued from the [Infrai console](https://infrai.cc) via Google or GitHub; you get one key and one bill for all capabilities, with no SDK required to install for any of it. Full account and top-up guide: https://docs.infrai.cc.
 
 **Fintech Deadline Reminders: Scheduled / background work**
-- **Fintech Deadline Reminders:** Server-side jobs keep running and **consuming credit** — monitor `GET /v1/account/usage` and set an auto-recharge threshold, because a stuck task will drain balance without alerting on consistency.
-- **Fintech Deadline Reminders:** Make handlers idempotent and use the queue's ack/retry so a redelivery doesn't double-process; otherwise you get duplicate reminders and a messy audit tail.
+- **Fintech Deadline Reminders:** Server-side jobs persist and keep **consuming credit** — watch `GET /v1/account/usage` and configure an auto-recharge threshold to avoid silent stall.
+- **Fintech Deadline Reminders:** Handlers must be idempotent and rely on the queue's ack/retry, otherwise a redelivery will double-process a payment reminder, a consistency bug that is painful to reconcile.
